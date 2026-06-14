@@ -2,9 +2,23 @@ import { useEffect, useRef, useCallback } from "react";
 import { CanvasRenderer } from "@/engine/CanvasRenderer";
 import { useCanvasStore } from "@/store/canvasStore";
 import { useColorStore } from "@/store/colorStore";
+import type { SelectionRect } from "@/types";
 
 export interface StitchCanvasHandle {
   getRenderer: () => CanvasRenderer | null;
+}
+
+function isPointInRect(col: number, row: number, rect: SelectionRect): boolean {
+  return (
+    col >= rect.col &&
+    col < rect.col + rect.width &&
+    row >= rect.row &&
+    row < rect.row + rect.height
+  );
+}
+
+function isPointInAnyRect(col: number, row: number, rects: SelectionRect[]): boolean {
+  return rects.some((r) => isPointInRect(col, row, r));
 }
 
 export default function StitchCanvas() {
@@ -17,11 +31,23 @@ export default function StitchCanvas() {
   const lastPaintRef = useRef<{ col: number; row: number } | null>(null);
   const panStartRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const rafRef = useRef<number | null>(null);
+  const marchingRafRef = useRef<number | null>(null);
+
+  const selectStartRef = useRef<{ col: number; row: number } | null>(null);
+  const selectDraggingRef = useRef(false);
+  const moveStartRef = useRef<{ col: number; row: number; x: number; y: number } | null>(null);
+  const isMovingRef = useRef(false);
 
   const {
     cols, rows, cells, viewport, tool,
     hoveredCell, showStitchMark,
+    selectionRects, selectionClipboard, selectionActionMode,
+    selectionGhostOffset, selectionMarchingPhase,
     setViewport, setHoveredCell, paintCell, pushUndo,
+    setSelectionRects, clearSelection, setSelectionActionMode,
+    setSelectionGhostOffset, setSelectionMarchingPhase,
+    selectionCopy, selectionPaste, selectionMove,
+    selectionRotate, selectionFlip,
   } = useCanvasStore();
 
   const colors = useColorStore((s) => s.colors);
@@ -34,21 +60,58 @@ export default function StitchCanvas() {
   }, [colors]);
 
   const scheduleRender = useCallback(() => {
+    if (rafRef.current) return;
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null;
       const r = rendererRef.current;
       if (!r) return;
+      const state = useCanvasStore.getState();
+      const ghostCells = state.selectionActionMode === "pasting" ? state.selectionClipboard?.cells : null;
       r.render({
-        viewport: useCanvasStore.getState().viewport,
-        cols: useCanvasStore.getState().cols,
-        rows: useCanvasStore.getState().rows,
-        cells: useCanvasStore.getState().cells,
+        viewport: state.viewport,
+        cols: state.cols,
+        rows: state.rows,
+        cells: state.cells,
         colorMap: colorMapRef.current,
-        hoveredCell: useCanvasStore.getState().hoveredCell,
-        showStitchMark: useCanvasStore.getState().showStitchMark,
+        hoveredCell: state.hoveredCell,
+        showStitchMark: state.showStitchMark,
+        selectionRects: state.selectionRects,
+        selectionMarchingPhase: state.selectionMarchingPhase,
+        ghostCells,
+        ghostOffset: state.selectionGhostOffset,
       });
     });
   }, []);
+
+  const startMarchingAnimation = useCallback(() => {
+    if (marchingRafRef.current) return;
+    let lastTime = performance.now();
+    const animate = (time: number) => {
+      const delta = time - lastTime;
+      lastTime = time;
+      const state = useCanvasStore.getState();
+      const newPhase = (state.selectionMarchingPhase + delta * 0.03) % 20;
+      setSelectionMarchingPhase(newPhase);
+      scheduleRender();
+      marchingRafRef.current = requestAnimationFrame(animate);
+    };
+    marchingRafRef.current = requestAnimationFrame(animate);
+  }, [scheduleRender, setSelectionMarchingPhase]);
+
+  const stopMarchingAnimation = useCallback(() => {
+    if (marchingRafRef.current) {
+      cancelAnimationFrame(marchingRafRef.current);
+      marchingRafRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectionRects.length > 0 || selectionActionMode === "pasting") {
+      startMarchingAnimation();
+    } else {
+      stopMarchingAnimation();
+    }
+  }, [selectionRects.length, selectionActionMode, startMarchingAnimation, stopMarchingAnimation]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -77,12 +140,18 @@ export default function StitchCanvas() {
     return () => {
       window.removeEventListener("resize", handleResize);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      stopMarchingAnimation();
     };
-  }, [scheduleRender]);
+  }, [scheduleRender, stopMarchingAnimation]);
 
   useEffect(() => {
     scheduleRender();
-  }, [viewport, cols, rows, cells, hoveredCell, showStitchMark, scheduleRender]);
+  }, [
+    viewport, cols, rows, cells, hoveredCell, showStitchMark,
+    selectionRects, selectionMarchingPhase, selectionGhostOffset,
+    selectionActionMode, selectionClipboard,
+    scheduleRender,
+  ]);
 
   useEffect(() => {
     scheduleRender();
@@ -120,6 +189,8 @@ export default function StitchCanvas() {
       if (!renderer) return;
       const vp = useCanvasStore.getState().viewport;
       const { col, row } = renderer.screenToGrid(pos.x, pos.y, vp);
+      const state = useCanvasStore.getState();
+
       setHoveredCell({ col, row });
 
       if (isPanningRef.current && panStartRef.current) {
@@ -129,7 +200,50 @@ export default function StitchCanvas() {
           offsetX: panStartRef.current.ox + dx,
           offsetY: panStartRef.current.oy + dy,
         });
-      } else if (isPaintingRef.current && !spacePressedRef.current) {
+        return;
+      }
+
+      if (state.tool === "select") {
+        if (selectDraggingRef.current && selectStartRef.current) {
+          const start = selectStartRef.current;
+          const width = col - start.col + 1;
+          const height = row - start.row + 1;
+          const tempRect: SelectionRect = { col: start.col, row: start.row, width, height };
+          const s = useCanvasStore.getState();
+          const allRects = s.selectionRects.slice(0, e.shiftKey ? -1 : 0);
+          setSelectionRects([...allRects, tempRect], false);
+          return;
+        }
+
+        if (isMovingRef.current && moveStartRef.current && state.selectionRects.length > 0) {
+          const { col: startCol, row: startRow } = moveStartRef.current;
+          const dCol = col - startCol;
+          const dRow = row - startRow;
+          if (dCol !== 0 || dRow !== 0) {
+            moveStartRef.current = { col, row, x: pos.x, y: pos.y };
+            const s = useCanvasStore.getState();
+            s.selectionMove(dCol, dRow, true);
+          }
+          return;
+        }
+
+        if (state.selectionActionMode === "pasting" && state.selectionClipboard) {
+          const offsetCol = col;
+          const offsetRow = row;
+          setSelectionGhostOffset({ col: offsetCol, row: offsetRow });
+          return;
+        }
+
+        if (state.selectionRects.length > 0 && !spacePressedRef.current) {
+          const inSelection = isPointInAnyRect(col, row, state.selectionRects);
+          canvas.style.cursor = inSelection ? "move" : "crosshair";
+        } else {
+          canvas.style.cursor = "crosshair";
+        }
+        return;
+      }
+
+      if (isPaintingRef.current && !spacePressedRef.current) {
         const last = lastPaintRef.current;
         if (!last || last.col !== col || last.row !== row) {
           const state = useCanvasStore.getState();
@@ -147,11 +261,12 @@ export default function StitchCanvas() {
       if (!renderer) return;
       const vp = useCanvasStore.getState().viewport;
       const { col, row } = renderer.screenToGrid(pos.x, pos.y, vp);
+      const state = useCanvasStore.getState();
 
       const shouldPan =
         e.button === 1 ||
         (e.button === 0 && spacePressedRef.current) ||
-        (e.button === 0 && e.shiftKey);
+        (e.button === 0 && e.shiftKey && state.tool !== "select");
 
       if (shouldPan) {
         isPanningRef.current = true;
@@ -166,15 +281,42 @@ export default function StitchCanvas() {
         return;
       }
 
+      if (e.button === 0 && state.tool === "select") {
+        if (state.selectionActionMode === "pasting" && state.selectionClipboard) {
+          if (col >= 0 && col < state.cols && row >= 0 && row < state.rows) {
+            selectionPaste(col, row);
+          }
+          return;
+        }
+
+        const inSelection = isPointInAnyRect(col, row, state.selectionRects);
+        if (inSelection && !e.shiftKey) {
+          isMovingRef.current = true;
+          moveStartRef.current = { col, row, x: pos.x, y: pos.y };
+          canvas.style.cursor = "grabbing";
+          pushUndo();
+          return;
+        }
+
+        selectStartRef.current = { col, row };
+        selectDraggingRef.current = true;
+        setSelectionActionMode("drawing");
+        if (!e.shiftKey) {
+          setSelectionRects([{ col, row, width: 1, height: 1 }], false);
+        } else {
+          const s = useCanvasStore.getState();
+          setSelectionRects([...s.selectionRects, { col, row, width: 1, height: 1 }], false);
+        }
+        return;
+      }
+
       if (e.button === 0) {
-        const mode = useCanvasStore.getState().tool;
+        const mode = state.tool;
         if (mode === "picker") {
-          const state = useCanvasStore.getState();
           const cid = state.cells[row]?.[col];
           if (cid) setSelectedColorId(cid);
           return;
         }
-        const state = useCanvasStore.getState();
         if (col >= 0 && col < state.cols && row >= 0 && row < state.rows) {
           pushUndo();
           isPaintingRef.current = true;
@@ -189,10 +331,25 @@ export default function StitchCanvas() {
       isPanningRef.current = false;
       panStartRef.current = null;
       lastPaintRef.current = null;
+      selectDraggingRef.current = false;
+      selectStartRef.current = null;
+      isMovingRef.current = false;
+      moveStartRef.current = null;
+
+      const state = useCanvasStore.getState();
+      if (state.tool === "select" && state.selectionActionMode === "drawing") {
+        setSelectionActionMode("idle");
+      }
+
       if (canvasRef.current) {
-        canvasRef.current.style.cursor = spacePressedRef.current
-          ? "grab"
-          : "crosshair";
+        const s = useCanvasStore.getState();
+        if (spacePressedRef.current) {
+          canvasRef.current.style.cursor = "grab";
+        } else if (s.tool === "select" && s.selectionRects.length > 0) {
+          canvasRef.current.style.cursor = "crosshair";
+        } else {
+          canvasRef.current.style.cursor = "crosshair";
+        }
       }
     };
 
@@ -216,6 +373,10 @@ export default function StitchCanvas() {
       isPaintingRef.current = false;
       panStartRef.current = null;
       lastPaintRef.current = null;
+      selectDraggingRef.current = false;
+      selectStartRef.current = null;
+      isMovingRef.current = false;
+      moveStartRef.current = null;
     };
 
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
@@ -235,7 +396,9 @@ export default function StitchCanvas() {
       canvas.removeEventListener("mouseleave", onMouseLeave);
       canvas.removeEventListener("contextmenu", onContextMenu);
     };
-  }, [applyPaintAt, setViewport, setHoveredCell, pushUndo, setSelectedColorId]);
+  }, [applyPaintAt, setViewport, setHoveredCell, pushUndo, setSelectedColorId,
+      setSelectionRects, setSelectionActionMode, setSelectionGhostOffset,
+      selectionPaste]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -248,6 +411,112 @@ export default function StitchCanvas() {
       if (e.code === "KeyB") useCanvasStore.getState().setTool("brush");
       if (e.code === "KeyE") useCanvasStore.getState().setTool("eraser");
       if (e.code === "KeyI") useCanvasStore.getState().setTool("picker");
+      if (e.code === "KeyV" && !e.ctrlKey && !e.metaKey) {
+        const s = useCanvasStore.getState();
+        if (s.selectionClipboard && s.tool === "select") {
+          s.setSelectionActionMode("pasting");
+          s.setSelectionGhostOffset(s.hoveredCell || { col: 0, row: 0 });
+        } else {
+          useCanvasStore.getState().setTool("select");
+        }
+      }
+      if (e.code === "Escape") {
+        const s = useCanvasStore.getState();
+        if (s.selectionActionMode === "pasting") {
+          s.setSelectionActionMode("idle");
+          s.setSelectionGhostOffset(null);
+        } else {
+          s.clearSelection();
+        }
+      }
+      if (e.code === "KeyC" && (e.ctrlKey || e.metaKey)) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionCopy();
+        }
+      }
+      if (e.code === "KeyV" && (e.ctrlKey || e.metaKey)) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionClipboard) {
+          e.preventDefault();
+          if (s.selectionActionMode !== "pasting") {
+            s.setSelectionActionMode("pasting");
+            s.setSelectionGhostOffset(s.hoveredCell || { col: 0, row: 0 });
+          }
+        }
+      }
+      if (e.code === "KeyR" && !e.repeat) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionRotate(!e.shiftKey);
+        }
+      }
+      if (e.code === "KeyH" && !e.repeat && !e.ctrlKey && !e.metaKey) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionFlip(true);
+        }
+      }
+      if (e.code === "KeyF" && !e.repeat && !e.ctrlKey && !e.metaKey) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionFlip(false);
+        }
+      }
+      if ((e.code === "Delete" || e.code === "Backspace") && !e.repeat) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.pushUndo();
+          const changes: { col: number; row: number; colorId: null }[] = [];
+          for (const rect of s.selectionRects) {
+            for (let r = rect.row; r < rect.row + rect.height; r++) {
+              for (let c = rect.col; c < rect.col + rect.width; c++) {
+                if (c >= 0 && c < s.cols && r >= 0 && r < s.rows) {
+                  if (s.cells[r][c] !== null) {
+                    changes.push({ col: c, row: r, colorId: null });
+                  }
+                }
+              }
+            }
+          }
+          if (changes.length > 0) {
+            s.paintCells(changes);
+          }
+        }
+      }
+      if (e.code === "ArrowUp" && !e.repeat) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionMove(0, -1);
+        }
+      }
+      if (e.code === "ArrowDown" && !e.repeat) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionMove(0, 1);
+        }
+      }
+      if (e.code === "ArrowLeft" && !e.repeat) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionMove(-1, 0);
+        }
+      }
+      if (e.code === "ArrowRight" && !e.repeat) {
+        const s = useCanvasStore.getState();
+        if (s.tool === "select" && s.selectionRects.length > 0) {
+          e.preventDefault();
+          s.selectionMove(1, 0);
+        }
+      }
       if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) {
         e.preventDefault();
         useCanvasStore.getState().undo();
@@ -264,7 +533,8 @@ export default function StitchCanvas() {
       if (e.code === "Space") {
         spacePressedRef.current = false;
         if (canvasRef.current && !isPanningRef.current) {
-          canvasRef.current.style.cursor = "crosshair";
+          const s = useCanvasStore.getState();
+          canvasRef.current.style.cursor = s.tool === "select" ? "crosshair" : "crosshair";
         }
       }
     };

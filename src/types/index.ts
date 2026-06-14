@@ -17,7 +17,7 @@ export interface UndoSnapshot {
   rows: number;
 }
 
-export type ToolMode = "brush" | "eraser" | "picker";
+export type ToolMode = "brush" | "eraser" | "picker" | "select";
 
 export interface CanvasViewport {
   scale: number;
@@ -36,6 +36,35 @@ export interface Scheme {
   mmPerCell: number;
   cells: string;
   colors?: ColorEntry[];
+}
+
+export interface SelectionRect {
+  col: number;
+  row: number;
+  width: number;
+  height: number;
+}
+
+export interface ClipboardData {
+  cells: CellGrid;
+  width: number;
+  height: number;
+}
+
+export type SelectionActionMode =
+  | "idle"
+  | "drawing"
+  | "moving"
+  | "pasting"
+  | "dragging-selection";
+
+export interface SelectionState {
+  rects: SelectionRect[];
+  clipboard: ClipboardData | null;
+  actionMode: SelectionActionMode;
+  ghostOffset: { col: number; row: number } | null;
+  marchingPhase: number;
+  clearOnToolSwitch: boolean;
 }
 
 export interface CtReference {

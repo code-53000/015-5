@@ -11,6 +11,16 @@ import {
   ZoomOut,
   Maximize2,
   Ribbon,
+  MousePointer2,
+  Copy,
+  ClipboardPaste,
+  RotateCw,
+  RotateCcw,
+  FlipHorizontal,
+  FlipVertical,
+  Move,
+  Lock,
+  Unlock,
 } from "lucide-react";
 import { useCanvasStore } from "@/store/canvasStore";
 import { useColorStore } from "@/store/colorStore";
@@ -38,6 +48,19 @@ export default function Toolbar({ onSave, onResize }: Props) {
   const schemeName = useCanvasStore((s) => s.currentSchemeName);
   const saving = useCanvasStore((s) => null);
 
+  const selectionRects = useCanvasStore((s) => s.selectionRects);
+  const selectionClipboard = useCanvasStore((s) => s.selectionClipboard);
+  const selectionClearOnToolSwitch = useCanvasStore((s) => s.selectionClearOnToolSwitch);
+  const selectionCopy = useCanvasStore((s) => s.selectionCopy);
+  const selectionPaste = useCanvasStore((s) => s.selectionPaste);
+  const selectionRotate = useCanvasStore((s) => s.selectionRotate);
+  const selectionFlip = useCanvasStore((s) => s.selectionFlip);
+  const setSelectionActionMode = useCanvasStore((s) => s.setSelectionActionMode);
+  const setSelectionGhostOffset = useCanvasStore((s) => s.setSelectionGhostOffset);
+  const setSelectionClearOnToolSwitch = useCanvasStore((s) => s.setSelectionClearOnToolSwitch);
+  const clearSelection = useCanvasStore((s) => s.clearSelection);
+  const hoveredCell = useCanvasStore((s) => s.hoveredCell);
+
   const selectedColor = useColorStore((s) => s.colors.find((c) => c.id === s.selectedColorId));
 
   const handleZoom = (factor: number) => {
@@ -49,6 +72,7 @@ export default function Toolbar({ onSave, onResize }: Props) {
     { id: "brush" as const, icon: Brush, label: "画笔", shortcut: "B" },
     { id: "eraser" as const, icon: Eraser, label: "橡皮", shortcut: "E" },
     { id: "picker" as const, icon: Pipette, label: "吸管", shortcut: "I" },
+    { id: "select" as const, icon: MousePointer2, label: "选区", shortcut: "V" },
   ];
 
   return (
@@ -85,6 +109,126 @@ export default function Toolbar({ onSave, onResize }: Props) {
           );
         })}
       </div>
+
+      {tool === "select" && (
+        <>
+          <div className="h-7 w-px bg-linen-300 mx-1" />
+          <div className="flex items-center gap-1 bg-linen-100 rounded-lg p-1 border border-linen-300">
+            <button
+              onClick={selectionCopy}
+              disabled={selectionRects.length === 0}
+              title="复制选区 (Ctrl+C)"
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionRects.length > 0
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-linen-400 cursor-not-allowed"
+              )}
+            >
+              <Copy className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => {
+                const s = useCanvasStore.getState();
+                if (s.selectionClipboard) {
+                  s.setSelectionActionMode("pasting");
+                  s.setSelectionGhostOffset(s.hoveredCell || { col: 0, row: 0 });
+                }
+              }}
+              disabled={!selectionClipboard}
+              title="粘贴 (Ctrl+V)"
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionClipboard
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-linen-400 cursor-not-allowed"
+              )}
+            >
+              <ClipboardPaste className="w-4 h-4" />
+            </button>
+            <div className="w-px h-5 bg-linen-300 mx-0.5" />
+            <button
+              onClick={() => selectionRotate(true)}
+              disabled={selectionRects.length === 0}
+              title="顺时针旋转 90° (R)"
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionRects.length > 0
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-linen-400 cursor-not-allowed"
+              )}
+            >
+              <RotateCw className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => selectionRotate(false)}
+              disabled={selectionRects.length === 0}
+              title="逆时针旋转 90° (Shift+R)"
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionRects.length > 0
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-linen-400 cursor-not-allowed"
+              )}
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+            <div className="w-px h-5 bg-linen-300 mx-0.5" />
+            <button
+              onClick={() => selectionFlip(true)}
+              disabled={selectionRects.length === 0}
+              title="水平翻转 (H)"
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionRects.length > 0
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-linen-400 cursor-not-allowed"
+              )}
+            >
+              <FlipHorizontal className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => selectionFlip(false)}
+              disabled={selectionRects.length === 0}
+              title="垂直翻转 (F)"
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionRects.length > 0
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-linen-400 cursor-not-allowed"
+              )}
+            >
+              <FlipVertical className="w-4 h-4" />
+            </button>
+            <div className="w-px h-5 bg-linen-300 mx-0.5" />
+            <button
+              onClick={clearSelection}
+              disabled={selectionRects.length === 0}
+              title="取消选区 (Esc)"
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionRects.length > 0
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-linen-400 cursor-not-allowed"
+              )}
+            >
+              <Move className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setSelectionClearOnToolSwitch(!selectionClearOnToolSwitch)}
+              title={selectionClearOnToolSwitch ? "切换工具时清除选区" : "切换工具时保留选区"}
+              className={clsx(
+                "w-8 h-8 rounded-md flex items-center justify-center transition-all",
+                selectionClearOnToolSwitch
+                  ? "text-sienna-500 hover:text-sienna-700 hover:bg-linen-200/60"
+                  : "text-stitch-500 bg-linen-200/60"
+              )}
+            >
+              {selectionClearOnToolSwitch ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
+            </button>
+          </div>
+        </>
+      )}
 
       <div className="h-7 w-px bg-linen-300 mx-1" />
 

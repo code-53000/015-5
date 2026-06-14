@@ -1,4 +1,4 @@
-import type { CanvasViewport, CellGrid, ColorEntry } from "@/types";
+import type { CanvasViewport, CellGrid, ColorEntry, SelectionRect } from "@/types";
 
 export interface RenderOptions {
   viewport: CanvasViewport;
@@ -9,6 +9,10 @@ export interface RenderOptions {
   hoveredCell: { col: number; row: number } | null;
   showStitchMark: boolean;
   highlightEmpty?: boolean;
+  selectionRects?: SelectionRect[];
+  selectionMarchingPhase?: number;
+  ghostCells?: CellGrid | null;
+  ghostOffset?: { col: number; row: number } | null;
 }
 
 export class CanvasRenderer {
@@ -46,7 +50,19 @@ export class CanvasRenderer {
   }
 
   render(opts: RenderOptions) {
-    const { viewport: vp, cols, rows, cells, colorMap, hoveredCell, showStitchMark } = opts;
+    const {
+      viewport: vp,
+      cols,
+      rows,
+      cells,
+      colorMap,
+      hoveredCell,
+      showStitchMark,
+      selectionRects,
+      selectionMarchingPhase = 0,
+      ghostCells,
+      ghostOffset,
+    } = opts;
     const ctx = this.ctx;
     const cssW = this.canvas.width / this.dpr;
     const cssH = this.canvas.height / this.dpr;
@@ -79,6 +95,10 @@ export class CanvasRenderer {
       }
     }
 
+    if (ghostCells && ghostOffset) {
+      this.drawGhostPreview(ghostCells, ghostOffset, vp, colorMap, cols, rows);
+    }
+
     if (hoveredCell) {
       const { col, row } = hoveredCell;
       if (col >= 0 && col < cols && row >= 0 && row < rows) {
@@ -93,6 +113,12 @@ export class CanvasRenderer {
 
     this.drawGridLines(vp, cols, rows, cssW, cssH);
     ctx.restore();
+
+    if (selectionRects && selectionRects.length > 0) {
+      for (const rect of selectionRects) {
+        this.drawSelectionRect(rect, vp, selectionMarchingPhase);
+      }
+    }
 
     this.drawGridBorder(gridLeft, gridTop, gridW, gridH);
   }
@@ -258,6 +284,72 @@ export class CanvasRenderer {
     ctx.strokeRect(ox + 0.5, oy + 0.5, totalW, totalH);
 
     return off.toDataURL("image/png");
+  }
+
+  private drawSelectionRect(rect: SelectionRect, vp: CanvasViewport, phase: number) {
+    const ctx = this.ctx;
+    const g = this.gridToScreen(rect.col, rect.row, vp);
+    const w = rect.width * vp.scale;
+    const h = rect.height * vp.scale;
+
+    ctx.save();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#1E40AF";
+    ctx.setLineDash([6, 4]);
+    ctx.lineDashOffset = -phase;
+    ctx.strokeRect(g.x, g.y, w, h);
+
+    ctx.strokeStyle = "#F0F9FF";
+    ctx.lineDashOffset = -phase - 5;
+    ctx.strokeRect(g.x, g.y, w, h);
+    ctx.restore();
+
+    if (vp.scale >= 6) {
+      ctx.save();
+      ctx.fillStyle = "rgba(30, 64, 175, 0.12)";
+      ctx.fillRect(g.x, g.y, w, h);
+      ctx.restore();
+    }
+  }
+
+  private drawGhostPreview(
+    ghostCells: CellGrid,
+    offset: { col: number; row: number },
+    vp: CanvasViewport,
+    colorMap: Map<string, ColorEntry>,
+    cols: number,
+    rows: number
+  ) {
+    const ctx = this.ctx;
+    const h = ghostCells.length;
+    const w = ghostCells[0]?.length ?? 0;
+    if (h === 0 || w === 0) return;
+
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const cid = ghostCells[r]?.[c];
+        if (!cid) continue;
+        const targetCol = offset.col + c;
+        const targetRow = offset.row + r;
+        if (targetCol < 0 || targetCol >= cols || targetRow < 0 || targetRow >= rows) continue;
+        const color = colorMap.get(cid);
+        if (!color) continue;
+        this.drawCell(targetCol, targetRow, vp, color.hexColor, false);
+      }
+    }
+
+    ctx.restore();
+
+    const g = this.gridToScreen(offset.col, offset.row, vp);
+    ctx.save();
+    ctx.strokeStyle = "rgba(30, 64, 175, 0.6)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(g.x, g.y, w * vp.scale, h * vp.scale);
+    ctx.restore();
   }
 
   private darken(hex: string, amount: number): string {
